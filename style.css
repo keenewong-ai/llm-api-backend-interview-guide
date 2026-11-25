@@ -460,3 +460,29 @@ details.qa p { margin: 0; color: var(--text-muted); }
   .nav-dir.next { text-align: left; }
 }
 
+.lesson-num,
+.lesson-id-badge {
+  font-family: "SF Mono", "Fira Code", Consolas, monospace;
+  letter-spacing: 0.02em;
+}
+
+h1 .lesson-id-badge,
+.lesson-kicker .lesson-id-badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--accent);
+  border: 1px solid var(--accent-soft);
+  border-radius: 6px;
+  padding: 3px 8px;
+  vertical-align: middle;
+  position: relative;
+  top: -0.12em;
+  margin-right: 2px;
+}
+
+h1 .lesson-id-badge {
+  margin-right: 10px;
+  top: -0.18em;
+}

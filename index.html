@@ -52,56 +52,56 @@
       <h2>七堂課</h2>
       <p class="lead">跟住順序讀最好，每堂都可以獨立溫習。進度會自動保存在本機瀏覽器。</p>
       <div class="lesson-list">
-        <a class="lesson-card" data-lesson="rate-limit" href="lessons/rate-limit.html">
-          <span class="lesson-num">01</span>
+        <a class="lesson-card" data-lesson="rate-limit" data-lesson-id="L01" href="lessons/rate-limit.html">
+          <span class="lesson-num" data-lesson-id="L01">L01</span>
           <span class="lesson-body">
             <span class="lesson-title">429 Rate Limit</span>
             <span class="lesson-lead">429 唔係 bug，係常態。重點係點樣「有禮貌咁」重試，同埋喺自己系統入面先做好 admission control。</span>
           </span>
           <span class="lesson-status" aria-hidden="true"></span>
         </a>
-        <a class="lesson-card" data-lesson="streaming" href="lessons/streaming.html">
-          <span class="lesson-num">02</span>
+        <a class="lesson-card" data-lesson="streaming" data-lesson-id="L02" href="lessons/streaming.html">
+          <span class="lesson-num" data-lesson-id="L02">L02</span>
           <span class="lesson-body">
             <span class="lesson-title">Streaming</span>
             <span class="lesson-lead">Streaming 令用戶好快見到第一個字（TTFT），但同時帶嚟斷線、buffering、backpressure 等一堆工程問題。</span>
           </span>
           <span class="lesson-status" aria-hidden="true"></span>
         </a>
-        <a class="lesson-card" data-lesson="structured" href="lessons/structured.html">
-          <span class="lesson-num">03</span>
+        <a class="lesson-card" data-lesson="structured" data-lesson-id="L03" href="lessons/structured.html">
+          <span class="lesson-num" data-lesson-id="L03">L03</span>
           <span class="lesson-body">
             <span class="lesson-title">Structured Output</span>
             <span class="lesson-lead">LLM 本質係生成文字，但 backend 需要可以 parse 嘅資料。重點：schema 約束 + 驗證 + 失敗重試。</span>
           </span>
           <span class="lesson-status" aria-hidden="true"></span>
         </a>
-        <a class="lesson-card" data-lesson="rag" href="lessons/rag.html">
-          <span class="lesson-num">04</span>
+        <a class="lesson-card" data-lesson="rag" data-lesson-id="L04" href="lessons/rag.html">
+          <span class="lesson-num" data-lesson-id="L04">L04</span>
           <span class="lesson-body">
             <span class="lesson-title">RAG</span>
             <span class="lesson-lead">RAG 嘅質素 80% 取決於 retrieval，而唔係 LLM。Garbage in, garbage out。</span>
           </span>
           <span class="lesson-status" aria-hidden="true"></span>
         </a>
-        <a class="lesson-card" data-lesson="fallback" href="lessons/fallback.html">
-          <span class="lesson-num">05</span>
+        <a class="lesson-card" data-lesson="fallback" data-lesson-id="L05" href="lessons/fallback.html">
+          <span class="lesson-num" data-lesson-id="L05">L05</span>
           <span class="lesson-body">
             <span class="lesson-title">Fallback & Routing</span>
             <span class="lesson-lead">冇任何一個 provider 係 100% uptime。Production 要假設佢會慢、會錯、會限流。</span>
           </span>
           <span class="lesson-status" aria-hidden="true"></span>
         </a>
-        <a class="lesson-card" data-lesson="caching" href="lessons/caching.html">
-          <span class="lesson-num">06</span>
+        <a class="lesson-card" data-lesson="caching" data-lesson-id="L06" href="lessons/caching.html">
+          <span class="lesson-num" data-lesson-id="L06">L06</span>
           <span class="lesson-body">
             <span class="lesson-title">Caching</span>
             <span class="lesson-lead">最平、最快嘅 LLM call 就係唔使 call。但 cache 錯咗嘅答案比慢更差。</span>
           </span>
           <span class="lesson-status" aria-hidden="true"></span>
         </a>
-        <a class="lesson-card" data-lesson="gateway" href="lessons/gateway.html">
-          <span class="lesson-num">07</span>
+        <a class="lesson-card" data-lesson="gateway" data-lesson-id="L07" href="lessons/gateway.html">
+          <span class="lesson-num" data-lesson-id="L07">L07</span>
           <span class="lesson-body">
             <span class="lesson-title">LLM Gateway</span>
             <span class="lesson-lead">當公司有多個團隊、多個 provider，就需要一個中央入口統一管理 auth、限流、成本同觀測。</span>
@@ -129,9 +129,9 @@
       <h2>延伸閱讀</h2>
       <p class="lead">唔計入 7 堂進度，但面試都好常問，建議一併溫習。</p>
       <div class="ref-list">
-        <a class="ref-card" href="reference/observability.html"><span class="lesson-num">B1</span><span class="lesson-title">Observability & Cost</span></a>
-        <a class="ref-card" href="reference/security.html"><span class="lesson-num">B2</span><span class="lesson-title">Security：Prompt Injection</span></a>
-        <a class="ref-card" href="reference/cheatsheet.html"><span class="lesson-num">B3</span><span class="lesson-title">Q&A Cheat Sheet</span></a>
+        <a class="ref-card" data-lesson-id="L08" href="reference/observability.html"><span class="lesson-num" data-lesson-id="L08">L08</span><span class="lesson-title">Observability & Cost</span></a>
+        <a class="ref-card" data-lesson-id="L09" href="reference/security.html"><span class="lesson-num" data-lesson-id="L09">L09</span><span class="lesson-title">Security：Prompt Injection</span></a>
+        <a class="ref-card" data-lesson-id="L10" href="reference/cheatsheet.html"><span class="lesson-num" data-lesson-id="L10">L10</span><span class="lesson-title">Q&A Cheat Sheet</span></a>
       </div>
     </section>
   </main>
