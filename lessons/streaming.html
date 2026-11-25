@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-HK">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Streaming · LLM API Backend 面試指南</title>
+  <meta name="description" content="Streaming（SSE）：面試官真正想問嘅嘢、生產環境現實、解決思路、現實例子 + code。">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+  <link rel="stylesheet" href="../style.css">
+</head>
+<body class="page-lesson" data-lesson="streaming">
+  <div id="progress"></div>
+  
+  <header class="lesson-header">
+    <div class="container">
+      <a class="back-link" href="../index.html">← 返回課程首頁</a>
+      <p class="lesson-kicker">課程 · 02 / 07</p>
+      <h1>Streaming（SSE）</h1>
+      <p class="subtitle">Streaming 令用戶好快見到第一個字（TTFT），但同時帶嚟斷線、buffering、backpressure 等一堆工程問題。</p>
+      
+        <button type="button" class="complete-btn" data-complete-btn>
+          標記為已完成
+        </button>
+    </div>
+  </header>
+
+    <nav id="toc" aria-label="本堂目錄">
+    
+    <div class="container">
+      <a href="#ask">面試官真正想問嘅嘢</a>
+      <a href="#production">生產環境現實</a>
+      <a href="#approach">解決思路</a>
+      <a href="#examples">現實例子 + code</a>
+    </div>
+  </nav>
+
+  <main class="container lesson-main">
+    <section class="card" id="ask">
+  <h3>面試官真正想問嘅嘢</h3>
+  <ul><li>Streaming 係 LLM 產品體驗嘅核心，幾乎所有 chat 類產品都用</li><li>考你 HTTP / network 基本功（chunked transfer、keep-alive、proxy 行為）</li><li>考 error handling：已經送咗一半內容，之後出錯點算？</li><li>考資源管理：斷線之後有冇 leak</li></ul>
+  <div class="sample-answer">
+    <h4>🗣️ 示範答法（30 秒版）</h4>
+    <blockquote>「LLM streaming 一般用 SSE。Server 端我會將 upstream chunk 轉做 SSE event，每次 yield 前檢查 client 係咪已斷線，斷咗就 cancel upstream，慳 token。因為 header 已經送咗，中途錯誤要用 error event 通知前端。Client 端要自己 buffer，按 <code>\n\n</code> 拆 event，唔可以假設一個 chunk 一個 event。Deploy 時要關 proxy buffering、加 heartbeat、調高 read timeout。Monitoring 方面我會睇 TTFT、tokens/sec 同 stream 中斷率。」</blockquote>
+  </div>
+</section>
+
+<section class="card" id="production">
+  <h3>生產環境現實</h3>
+  <p><strong>情境：</strong>本地開發 streaming 好正常，一 deploy 上 production（前面有 Nginx），用戶就見到「轉圈 10 秒然後一次過彈晒成段字」。另外 billing 發現有好多 token 係用戶早已離開頁面之後仲繼續 generate。</p>
+<p><strong>原因同修正：</strong></p>
+<ol><li>Nginx <code>proxy_buffering</code> 預設開 → 對 SSE route 關掉，或者 response 加 <code>X-Accel-Buffering: no</code></li>
+<li>Backend 冇偵測 client disconnect → 每個 chunk 之前檢查連線，斷咗就 cancel upstream stream</li>
+<li>加 heartbeat comment（<code>: ping</code>）防止 idle timeout 斷線</li></ol>
+</section>
+
+<section class="card" id="approach">
+  <h3>解決思路</h3>
+  <p>大部分 LLM API 用 <strong>Server-Sent Events（SSE）</strong> 做 streaming：HTTP response 用 <code>Content-Type: text/event-stream</code>，每個 event 係 <code>data: ...\n\n</code>，逐 chunk（通常係 token 或幾個 token）推過嚟。</p>
+<ul><li><strong>Chunk handling</strong>：一個 network chunk 唔等於一個 event，可能半個 JSON、可能幾個 event 黐埋，要自己 buffer 同按 <code>\n\n</code> 拆</li><li><strong>Backpressure</strong>：如果 client 讀得慢，server 唔應該無限 buffer 喺 memory</li><li><strong>Client disconnect</strong>：用戶熄 tab 之後，要 cancel upstream request，否則繼續燒 token</li><li><strong>Proxy buffering</strong>：Nginx、部分 load balancer / CDN 預設會 buffer response，令 streaming 變成「最後一次過出晒」</li><li><strong>Metrics</strong>：TTFT（time to first token）、tokens/sec、總時間、中途失敗率</li></ul>
+  <div class="traps">
+    <h4>⚠️ 常見陷阱</h4>
+    <ul><li>假設一個 chunk = 一個完整 event，直接 <code>JSON.parse</code> → 偶發 parse error</li><li>冇處理 client disconnect，用戶走咗仍然繼續 generate 同計錢</li><li>Stream 開始之後先出錯，但仍然想返 500 —— HTTP status 已經送咗，只能用 error event</li><li>前面 proxy / CDN / compression middleware buffer 咗 response</li><li>Streaming 中途失敗由頭 retry，用戶見到重複文字；應該顯示部分結果 + 重試掣，或者 server 端記住已送內容</li><li>冇記錄 TTFT，淨係睇總 latency，睇唔到真正用戶體驗</li></ul>
+  </div>
+</section>
+
+<section class="card" id="examples">
+  <h3>現實例子 + code</h3>
+  <div class="code-block"><div class="code-title">Python · FastAPI SSE proxy</div><pre><code class="language-python"># FastAPI SSE proxy：轉發 LLM stream 俾前端，處理 disconnect + 錯誤
+import json
+from fastapi import FastAPI, Request
+from fastapi.responses import StreamingResponse
+from openai import AsyncOpenAI
+
+app = FastAPI()
+client = AsyncOpenAI()
+
+def sse(data: dict, event: str | None = None) -&gt; str:
+    prefix = f&quot;event: {event}\n&quot; if event else &quot;&quot;
+    return f&quot;{prefix}data: {json.dumps(data, ensure_ascii=False)}\n\n&quot;
+
+@app.post(&quot;/chat/stream&quot;)
+async def chat_stream(request: Request):
+    body = await request.json()
+
+    async def gen():
+        stream = await client.chat.completions.create(
+            model=body.get(&quot;model&quot;, &quot;gpt-4o-mini&quot;),
+            messages=body[&quot;messages&quot;],
+            stream=True,
+        )
+        try:
+            async for chunk in stream:
+                if await request.is_disconnected():
+                    break                      # 用戶走咗，停止消耗 token
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta.content
+                if delta:
+                    yield sse({&quot;delta&quot;: delta})
+            yield sse({&quot;done&quot;: True}, event=&quot;done&quot;)
+        except Exception as e:
+            # 已經開始 stream，唔可以再改 HTTP status，只能送 error event
+            yield sse({&quot;message&quot;: &quot;upstream_error&quot;, &quot;detail&quot;: str(e)[:200]}, event=&quot;error&quot;)
+        finally:
+            await stream.close()               # 確保 upstream connection 釋放
+
+    return StreamingResponse(gen(), media_type=&quot;text/event-stream&quot;, headers={
+        &quot;Cache-Control&quot;: &quot;no-cache&quot;,
+        &quot;X-Accel-Buffering&quot;: &quot;no&quot;,             # 叫 Nginx 唔好 buffer
+    })</code></pre></div><div class="code-block"><div class="code-title">TypeScript · client-side SSE parser with abort</div><pre><code class="language-typescript">// Browser / Node 18+：用 fetch 讀 SSE（POST 唔可以用 EventSource，所以自己 parse）
+export async function streamChat(messages: unknown[], onDelta: (t: string) =&gt; void,
+                                 signal?: AbortSignal) {
+  const res = await fetch(&quot;/chat/stream&quot;, {
+    method: &quot;POST&quot;,
+    headers: { &quot;Content-Type&quot;: &quot;application/json&quot; },
+    body: JSON.stringify({ messages }),
+    signal,                                   // 用戶按「停止」→ controller.abort()
+  });
+  if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = &quot;&quot;;
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    // 一個 network chunk 可能有半個或者幾個 event
+    let idx: number;
+    while ((idx = buffer.indexOf(&quot;\n\n&quot;)) !== -1) {
+      const raw = buffer.slice(0, idx);
+      buffer = buffer.slice(idx + 2);
+      let event = &quot;message&quot;;
+      const dataLines: string[] = [];
+      for (const line of raw.split(&quot;\n&quot;)) {
+        if (line.startsWith(&quot;event:&quot;)) event = line.slice(6).trim();
+        else if (line.startsWith(&quot;data:&quot;)) dataLines.push(line.slice(5).trim());
+      }
+      if (!dataLines.length) continue;        // heartbeat comment
+      const data = JSON.parse(dataLines.join(&quot;\n&quot;));
+      if (event === &quot;error&quot;) throw new Error(data.message);
+      if (event === &quot;done&quot;) return;
+      onDelta(data.delta);
+    }
+  }
+}</code></pre></div><div class="code-block"><div class="code-title">Nginx · SSE route config</div><pre><code class="language-nginx">location /chat/stream {
+    proxy_pass http://backend;
+    proxy_http_version 1.1;
+    proxy_set_header Connection &quot;&quot;;
+    proxy_buffering off;          # SSE 必須
+    proxy_cache off;
+    proxy_read_timeout 300s;      # 長回答唔好被 idle timeout 斬
+}</code></pre></div>
+</section>
+
+    <div class="lesson-pager"><a class="nav-dir prev" href="rate-limit.html"><span>上一堂</span><strong>429 Rate Limit</strong></a><a class="nav-dir next" href="structured.html"><span>下一堂</span><strong>Structured Output</strong></a></div>
+    
+        <button type="button" class="complete-btn" data-complete-btn>
+          標記為已完成
+        </button>
+  </main>
+
+  <footer>
+    <div class="container">
+      <p>LLM API Backend 面試實戰指南 · 專注 production 思維</p>
+    </div>
+  </footer>
+  <button id="to-top" aria-label="返回頂部">↑</button>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="../script.js"></script>
+</body>
+</html>

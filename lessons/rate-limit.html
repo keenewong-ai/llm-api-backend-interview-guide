@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-HK">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>429 Rate Limit · LLM API Backend 面試指南</title>
+  <meta name="description" content="處理 429 Rate Limit：面試官真正想問嘅嘢、生產環境現實、解決思路、現實例子 + code。">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+  <link rel="stylesheet" href="../style.css">
+</head>
+<body class="page-lesson" data-lesson="rate-limit">
+  <div id="progress"></div>
+  
+  <header class="lesson-header">
+    <div class="container">
+      <a class="back-link" href="../index.html">← 返回課程首頁</a>
+      <p class="lesson-kicker">課程 · 01 / 07</p>
+      <h1>處理 429 Rate Limit</h1>
+      <p class="subtitle">429 唔係 bug，係常態。重點係點樣「有禮貌咁」重試，同埋喺自己系統入面先做好 admission control。</p>
+      
+        <button type="button" class="complete-btn" data-complete-btn>
+          標記為已完成
+        </button>
+    </div>
+  </header>
+
+    <nav id="toc" aria-label="本堂目錄">
+    
+    <div class="container">
+      <a href="#ask">面試官真正想問嘅嘢</a>
+      <a href="#production">生產環境現實</a>
+      <a href="#approach">解決思路</a>
+      <a href="#examples">現實例子 + code</a>
+    </div>
+  </nav>
+
+  <main class="container lesson-main">
+    <section class="card" id="ask">
+  <h3>面試官真正想問嘅嘢</h3>
+  <ul><li>想知你有冇真係喺 production 撞過 429，定係只係 call 過 API demo</li><li>考你識唔識分 retryable vs non-retryable error</li><li>考 distributed system 基本功：backoff、jitter、限流、公平性（fairness）</li><li>睇你會唔會諗到「retry 本身都會加重負載」</li></ul>
+  <div class="sample-answer">
+    <h4>🗣️ 示範答法（30 秒版）</h4>
+    <blockquote>「我會先分清 429 係暫時 rate limit 定 quota 問題。暫時性嘅就用 exponential backoff 加 full jitter，有 <code>Retry-After</code> 就跟佢，同埋設 max retries 同總 deadline。但我唔會淨係靠 client retry——我會喺 backend 用 token bucket 按估算 token 做 admission control，每個 tenant 有自己 quota，batch job 行 queue 同低優先級，interactive traffic 優先。最後會 monitor 429 rate 同 provider 返嘅 remaining-limit headers，提早降速或者 fallback。」</blockquote>
+  </div>
+</section>
+
+<section class="card" id="production">
+  <h3>生產環境現實</h3>
+  <p><strong>情境：</strong>公司 SaaS 有個「AI 總結」功能，星期一朝早大量用戶同時登入，batch job 又同時跑緊。結果 TPM 爆咗，前台用戶見到錯誤，而 batch job 不停 retry 令情況更差。</p>
+<p><strong>處理方法：</strong></p>
+<ol><li>將 batch job 同 interactive traffic 分開 queue / 分開 API key 或 project，batch 用較低優先級</li>
+<li>Backend 加 token bucket，按估算 token 數（prompt + max_tokens）扣額度，而唔係淨係計 request 數</li>
+<li>每個 tenant 有自己 quota，超額返 429 俾自己嘅 client（附上 Retry-After），而唔係打去 provider 先爆</li>
+<li>Retry 用 backoff + full jitter，最多幾次，仲有整體 deadline</li></ol>
+</section>
+
+<section class="card" id="approach">
+  <h3>解決思路</h3>
+  <p>LLM provider 通常會用多個維度限流：<code>RPM</code>（requests per minute）、<code>TPM</code>（tokens per minute），有啲仲有每日限額或者 concurrency 限制。超出就會返 <code>HTTP 429 Too Many Requests</code>。</p>
+<p>要分清兩類 429：</p>
+<ul><li><strong>暫時性 rate limit</strong>：等一陣就得 → 可以 retry（配合 backoff + jitter，同尊重 <code>Retry-After</code>）</li><li><strong>Quota / billing 類錯誤</strong>（例如額度用完）：retry 幾多次都冇用 → 應該即刻 fail、通知、或者 fallback 去第二個 provider</li></ul>
+<p>核心工具：</p>
+<ul><li><strong>Exponential backoff + jitter</strong>：每次等候時間倍增，再加隨機值，避免所有 client 同一時間一齊重試（thundering herd）</li><li><strong>Retry-After header</strong>：provider 話你知要等幾耐，就跟佢</li><li><strong>Token bucket</strong>：喺自己 backend 先限流，令出去 provider 嘅流量平滑</li><li><strong>Per-user / per-tenant quota</strong>：防止單一用戶食晒全公司額度</li><li><strong>Queueing</strong>：非即時任務放入 queue（例如 Redis / SQS + worker），按 capacity 慢慢消化</li></ul>
+  <div class="traps">
+    <h4>⚠️ 常見陷阱</h4>
+    <ul><li>冇 jitter，所有 worker 同一秒重試 → 第二波 429</li><li>連 400 / 401 / quota error 都 retry，浪費時間又浪費錢</li><li>淨係計 RPM，唔計 TPM；一個長 context request 可以食好多 token</li><li>冇整體 deadline，用戶等咗 2 分鐘先收到錯誤</li><li>Multi-instance 部署仍然用 in-memory limiter，實際限額 = N 倍</li><li>Streaming request 中途斷咗，盲目由頭 retry 會令用戶見到重複內容</li></ul>
+  </div>
+</section>
+
+<section class="card" id="examples">
+  <h3>現實例子 + code</h3>
+  <div class="code-block"><div class="code-title">Python · async retry with backoff + full jitter + Retry-After</div><pre><code class="language-python">import asyncio
+import random
+import httpx
+
+RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+
+def is_quota_error(resp: httpx.Response) -&gt; bool:
+    # 唔同 provider 嘅 error 格式唔同，以下只係示意
+    try:
+        err = resp.json().get(&quot;error&quot;, {})
+    except ValueError:
+        return False
+    code = str(err.get(&quot;code&quot;, &quot;&quot;)) + str(err.get(&quot;type&quot;, &quot;&quot;))
+    return &quot;quota&quot; in code or &quot;billing&quot; in code
+
+def parse_retry_after(resp: httpx.Response) -&gt; float | None:
+    value = resp.headers.get(&quot;retry-after&quot;)
+    if value is None:
+        return None
+    try:
+        return float(value)          # 秒數格式
+    except ValueError:
+        return None                  # HTTP-date 格式可以另外 parse
+
+async def call_with_retry(client: httpx.AsyncClient, payload: dict,
+                          max_retries: int = 5, base: float = 0.5,
+                          cap: float = 20.0, deadline: float = 60.0):
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    for attempt in range(max_retries + 1):
+        try:
+            resp = await client.post(&quot;/v1/chat/completions&quot;, json=payload, timeout=30)
+        except (httpx.ConnectError, httpx.ReadTimeout):
+            resp = None
+
+        if resp is not None and resp.status_code &lt; 400:
+            return resp.json()
+        if resp is not None and resp.status_code not in RETRYABLE_STATUS:
+            resp.raise_for_status()               # 400/401/403 唔好 retry
+        if resp is not None and is_quota_error(resp):
+            raise RuntimeError(&quot;Quota exhausted: fallback or alert, don&#x27;t retry&quot;)
+        if attempt == max_retries:
+            break
+
+        # Full jitter: sleep = random(0, min(cap, base * 2^attempt))
+        delay = random.uniform(0, min(cap, base * 2 ** attempt))
+        if resp is not None and (ra := parse_retry_after(resp)) is not None:
+            delay = max(delay, ra)                # 尊重 provider 指示
+        if loop.time() - start + delay &gt; deadline:
+            break                                 # 超出整體 deadline 就放棄
+        await asyncio.sleep(delay)
+
+    raise RuntimeError(&quot;LLM call failed after retries&quot;)</code></pre></div><div class="code-block"><div class="code-title">TypeScript · per-tenant token bucket</div><pre><code class="language-typescript">// In-process token bucket（多 instance 部署時要搬去 Redis，用 Lua script 做 atomic 扣減）
+class TokenBucket {
+  private tokens: number;
+  private last = Date.now();
+  constructor(private capacity: number, private refillPerSec: number) {
+    this.tokens = capacity;
+  }
+  private refill() {
+    const now = Date.now();
+    this.tokens = Math.min(this.capacity,
+      this.tokens + ((now - this.last) / 1000) * this.refillPerSec);
+    this.last = now;
+  }
+  tryTake(cost: number): boolean {
+    this.refill();
+    if (this.tokens &gt;= cost) { this.tokens -= cost; return true; }
+    return false;
+  }
+  secondsUntil(cost: number): number {
+    this.refill();
+    return Math.max(0, (cost - this.tokens) / this.refillPerSec);
+  }
+}
+
+// 每個 tenant 一個 bucket，用「估算 token 數」做 cost，而唔係 1 request = 1
+const buckets = new Map&lt;string, TokenBucket&gt;();
+function admit(tenantId: string, estTokens: number) {
+  let b = buckets.get(tenantId);
+  if (!b) { b = new TokenBucket(40_000, 40_000 / 60); buckets.set(tenantId, b); }
+  if (b.tryTake(estTokens)) return { ok: true as const };
+  return { ok: false as const, retryAfter: Math.ceil(b.secondsUntil(estTokens)) };
+}
+
+// Express handler 例子
+// const r = admit(req.user.tenantId, estimateTokens(body));
+// if (!r.ok) return res.status(429).set(&quot;Retry-After&quot;, String(r.retryAfter)).json({ error: &quot;rate_limited&quot; });</code></pre></div>
+</section>
+
+    <div class="lesson-pager"><span class="nav-dir prev disabled"><span>上一堂</span><strong>—</strong></span><a class="nav-dir next" href="streaming.html"><span>下一堂</span><strong>Streaming</strong></a></div>
+    
+        <button type="button" class="complete-btn" data-complete-btn>
+          標記為已完成
+        </button>
+  </main>
+
+  <footer>
+    <div class="container">
+      <p>LLM API Backend 面試實戰指南 · 專注 production 思維</p>
+    </div>
+  </footer>
+  <button id="to-top" aria-label="返回頂部">↑</button>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="../script.js"></script>
+</body>
+</html>

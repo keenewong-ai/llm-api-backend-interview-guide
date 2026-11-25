@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-HK">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Fallback &amp; Routing · LLM API Backend 面試指南</title>
+  <meta name="description" content="Fallback &amp; Routing：面試官真正想問嘅嘢、生產環境現實、解決思路、現實例子 + code。">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+  <link rel="stylesheet" href="../style.css">
+</head>
+<body class="page-lesson" data-lesson="fallback">
+  <div id="progress"></div>
+  
+  <header class="lesson-header">
+    <div class="container">
+      <a class="back-link" href="../index.html">← 返回課程首頁</a>
+      <p class="lesson-kicker">課程 · 05 / 07</p>
+      <h1>Fallback & Routing</h1>
+      <p class="subtitle">冇任何一個 provider 係 100% uptime。Production 要假設佢會慢、會錯、會限流。</p>
+      
+        <button type="button" class="complete-btn" data-complete-btn>
+          標記為已完成
+        </button>
+    </div>
+  </header>
+
+    <nav id="toc" aria-label="本堂目錄">
+    
+    <div class="container">
+      <a href="#ask">面試官真正想問嘅嘢</a>
+      <a href="#production">生產環境現實</a>
+      <a href="#approach">解決思路</a>
+      <a href="#examples">現實例子 + code</a>
+    </div>
+  </nav>
+
+  <main class="container lesson-main">
+    <section class="card" id="ask">
+  <h3>面試官真正想問嘅嘢</h3>
+  <ul><li>考 reliability engineering：SLA、failure mode、graceful degradation</li><li>考成本意識：唔係所有 request 都要用最貴 model</li><li>考你有冇諗過 fallback 帶嚟嘅一致性問題（唔同 model 答案風格唔同）</li></ul>
+  <div class="sample-answer">
+    <h4>🗣️ 示範答法（30 秒版）</h4>
+    <blockquote>「我會假設 provider 一定會出事。每個 call 有分層 timeout 同總 deadline；每個 provider 有 circuit breaker，失敗率高就跳閘直接用 fallback chain。Fallback 只針對 5xx、timeout、rate limit，400 類唔會 fallback。Routing 方面按任務複雜度、latency 要求同用戶 tier 揀 model，簡單任務用細 model 慳成本。所有 fallback model 都要過同一套 eval，同埋 log 每個 request 用咗邊個 provider，方便 debug 同成本分析。」</blockquote>
+  </div>
+</section>
+
+<section class="card" id="production">
+  <h3>生產環境現實</h3>
+  <p><strong>情境：</strong>某日主 provider 出現 partial outage，大量 request 卡 30 秒先 timeout，連帶 backend thread / connection pool 被佔滿，整個 app（包括同 LLM 無關嘅功能）都慢晒。</p>
+<p><strong>處理：</strong>加 circuit breaker，失敗率高就即刻轉 fallback；timeout 由 30 秒調低並分層；LLM call 用獨立 connection pool / bulkhead 隔離；fallback 都失敗時返 graceful degradation（例如「AI 功能暫時唔用得」）而唔係成個頁面 error。</p>
+</section>
+
+<section class="card" id="approach">
+  <h3>解決思路</h3>
+  <ul><li><strong>Multi-provider failover</strong>：主 provider 出錯（5xx、timeout、429 用完 retry）就轉去後備 provider / model</li><li><strong>Model routing</strong>：按任務揀 model —— 簡單分類 / 抽取用細 model（平、快），複雜推理用大 model；亦可按 latency 要求、用戶 tier、context 長度揀</li><li><strong>Circuit breaker</strong>：某 provider 連續失敗超過門檻就「跳閘」一段時間，直接 skip，唔好每個 request 都等 timeout</li><li><strong>Timeouts</strong>：分開 connect timeout、TTFT timeout、總 timeout；設 overall deadline</li><li><strong>Hedging（進階）</strong>：對延遲敏感嘅 request，等一段時間未返就同時打第二個 provider，用先返嗰個（會增加成本，要小心使用）</li></ul>
+<p>注意：唔同 provider / model 嘅 prompt 行為、tokenizer、功能（例如 tool calling 格式、context 長度）都唔同，fallback 前要測試同做 adapter。</p>
+  <div class="traps">
+    <h4>⚠️ 常見陷阱</h4>
+    <ul><li>Timeout 設太長（或者冇設），一個慢 provider 拖垮整個服務</li><li>所有錯誤都 fallback，包括 400 invalid request —— 換 provider 都係錯</li><li>Fallback model 冇測過，prompt / output 格式唔兼容，structured output 大量 fail</li><li>Circuit breaker 狀態只存喺單一 instance，各 instance 行為唔一致（有時可接受，但要知道）</li><li>Fallback 去另一個 provider 時忽略咗 data residency / 合規要求</li><li>冇 log 每個 request 實際用咗邊個 provider，事後難以 debug 同計成本</li></ul>
+  </div>
+</section>
+
+<section class="card" id="examples">
+  <h3>現實例子 + code</h3>
+  <div class="code-block"><div class="code-title">TypeScript · provider failover + circuit breaker + timeout</div><pre><code class="language-typescript">type Provider = {
+  name: string;
+  call: (prompt: string, signal: AbortSignal) =&gt; Promise&lt;string&gt;;
+};
+
+class CircuitBreaker {
+  private failures = 0;
+  private openedAt = 0;
+  constructor(private threshold = 5, private cooldownMs = 30_000) {}
+
+  canPass(): boolean {
+    if (this.failures &lt; this.threshold) return true;            // closed
+    return Date.now() - this.openedAt &gt; this.cooldownMs;        // half-open：試一個
+  }
+  success() { this.failures = 0; }
+  failure() {
+    this.failures++;
+    if (this.failures &gt;= this.threshold) this.openedAt = Date.now();
+  }
+}
+
+const breakers = new Map&lt;string, CircuitBreaker&gt;();
+const breakerFor = (n: string) =&gt;
+  breakers.get(n) ?? breakers.set(n, new CircuitBreaker()).get(n)!;
+
+export async function callWithFallback(providers: Provider[], prompt: string,
+                                       perCallTimeoutMs = 15_000) {
+  const errors: string[] = [];
+  for (const p of providers) {
+    const cb = breakerFor(p.name);
+    if (!cb.canPass()) { errors.push(`${p.name}: circuit open`); continue; }
+    try {
+      const out = await p.call(prompt, AbortSignal.timeout(perCallTimeoutMs));
+      cb.success();
+      return { provider: p.name, output: out };
+    } catch (e) {
+      cb.failure();
+      errors.push(`${p.name}: ${(e as Error).message}`);
+      // 注意：400 類錯誤（prompt 本身有問題）通常唔應該 fallback
+    }
+  }
+  throw new Error(`All providers failed: ${errors.join(&quot; | &quot;)}`);
+}</code></pre></div><div class="code-block"><div class="code-title">Python · model routing by task / cost / latency</div><pre><code class="language-python"># 簡單 rule-based model routing；model 名只係示意
+def route(task: str, prompt_tokens: int, user_tier: str, latency_sensitive: bool) -&gt; list[str]:
+    if task in {&quot;classify&quot;, &quot;extract&quot;, &quot;summarize_short&quot;}:
+        chain = [&quot;small-fast-model&quot;, &quot;small-model-provider-b&quot;]
+    elif prompt_tokens &gt; 100_000:
+        chain = [&quot;long-context-model&quot;]          # 唔係每個 model 都支援長 context
+    elif user_tier == &quot;enterprise&quot; or task == &quot;complex_reasoning&quot;:
+        chain = [&quot;large-model&quot;, &quot;large-model-provider-b&quot;, &quot;small-fast-model&quot;]
+    else:
+        chain = [&quot;medium-model&quot;, &quot;small-fast-model&quot;]
+    if latency_sensitive:
+        chain = [m for m in chain if not m.startswith(&quot;large&quot;)] or chain
+    return chain   # 返一條 fallback chain，交俾 call_with_fallback</code></pre></div>
+</section>
+
+    <div class="lesson-pager"><a class="nav-dir prev" href="rag.html"><span>上一堂</span><strong>RAG</strong></a><a class="nav-dir next" href="caching.html"><span>下一堂</span><strong>Caching</strong></a></div>
+    
+        <button type="button" class="complete-btn" data-complete-btn>
+          標記為已完成
+        </button>
+  </main>
+
+  <footer>
+    <div class="container">
+      <p>LLM API Backend 面試實戰指南 · 專注 production 思維</p>
+    </div>
+  </footer>
+  <button id="to-top" aria-label="返回頂部">↑</button>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="../script.js"></script>
+</body>
+</html>

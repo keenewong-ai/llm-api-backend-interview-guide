@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-HK">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LLM Gateway · LLM API Backend 面試指南</title>
+  <meta name="description" content="LLM Gateway：面試官真正想問嘅嘢、生產環境現實、解決思路、現實例子 + code。">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+  <link rel="stylesheet" href="../style.css">
+</head>
+<body class="page-lesson" data-lesson="gateway">
+  <div id="progress"></div>
+  
+  <header class="lesson-header">
+    <div class="container">
+      <a class="back-link" href="../index.html">← 返回課程首頁</a>
+      <p class="lesson-kicker">課程 · 07 / 07</p>
+      <h1>LLM Gateway</h1>
+      <p class="subtitle">當公司有多個團隊、多個 provider，就需要一個中央入口統一管理 auth、限流、成本同觀測。</p>
+      
+        <button type="button" class="complete-btn" data-complete-btn>
+          標記為已完成
+        </button>
+    </div>
+  </header>
+
+    <nav id="toc" aria-label="本堂目錄">
+    
+    <div class="container">
+      <a href="#ask">面試官真正想問嘅嘢</a>
+      <a href="#production">生產環境現實</a>
+      <a href="#approach">解決思路</a>
+      <a href="#examples">現實例子 + code</a>
+    </div>
+  </nav>
+
+  <main class="container lesson-main">
+    <section class="card" id="ask">
+  <h3>面試官真正想問嘅嘢</h3>
+  <ul><li>考 platform / system design 能力，常見於 senior 或 platform team 面試</li><li>考你點樣平衡「集中管理」同「single point of failure / 額外延遲」</li><li>考安全同合規意識（key 管理、PII、audit log）</li></ul>
+  <div class="sample-answer">
+    <h4>🗣️ 示範答法（30 秒版）</h4>
+    <blockquote>「LLM Gateway 係所有 app 同 provider 之間嘅統一入口。App 用 virtual key，真正 provider key 只喺 gateway；gateway 做 auth、按 team 嘅 rate limit 同 budget、PII redaction、caching、routing 同 fallback，並為每個 request 記錄 team、model、tokens、latency 同 cost，用 OpenTelemetry 做 tracing。設計上 gateway 要 stateless、可以 horizontal scale，支援 streaming pass-through，避免成為瓶頸。可以用 LiteLLM 呢類 open-source proxy 起步，有特別需要再自建或擴展。」</blockquote>
+  </div>
+</section>
+
+<section class="card" id="production">
+  <h3>生產環境現實</h3>
+  <p><strong>情境：</strong>公司有 5 個團隊各自直接 call provider，各自 hardcode API key。月尾 billing 大增但無人知係邊個團隊、邊個功能用咗；有團隊將含客戶電話號碼嘅資料直接送去外部 API。</p>
+<p><strong>處理：</strong>建立 gateway，所有團隊改用 gateway 嘅 virtual key；provider key 收返入 secret manager 並 rotate；每個 request 帶 team / feature metadata；按 team 設預算同 alert；敏感欄位送出前 redact；gateway 本身 stateless、多 instance、horizontal scale，避免 single point of failure。</p>
+</section>
+
+<section class="card" id="approach">
+  <h3>解決思路</h3>
+  <p>LLM Gateway 係介乎內部應用同 LLM provider 之間嘅 proxy 層，通常提供 OpenAI-compatible API，令應用唔使理底層用邊個 provider。</p>
+<div class="diagram">App A / App B / Batch jobs
+        │  (internal API key / SSO)
+        ▼
+┌──────────────── LLM Gateway ────────────────┐
+│ Auth → Quota / Rate limit → PII redaction   │
+│ → Cache → Routing / Fallback → Provider call │
+│ → Logging / Cost tracking / Tracing          │
+└──────────────────────────────────────────────┘
+        │
+        ▼
+ Provider A   Provider B   Self-hosted model</div>
+<p>常見功能：</p>
+<ul><li><strong>Central auth</strong>：內部 virtual key 對應團隊 / 項目，真正 provider key 只存喺 gateway（secret manager），唔會散落各個 app</li><li><strong>Rate limit / budget</strong>：按 team / key 設 RPM、TPM、每月預算</li><li><strong>Logging & cost tracking</strong>：每個 request 記錄 model、tokens、latency、cost、team</li><li><strong>PII redaction</strong>：送出前遮蔽 email、電話、身份證號碼等（按合規要求）</li><li><strong>Observability</strong>：metrics、tracing（例如 OpenTelemetry）、錯誤率、TTFT</li><li><strong>Routing / fallback / caching</strong>：集中實現，唔使每個 app 自己寫</li></ul>
+<p>現成方案例如 open-source 嘅 LiteLLM（有 proxy server 模式）、Portkey 等 gateway 產品，亦可以自己用 FastAPI / Envoy 等自建。選擇時考慮：延遲 overhead、self-host vs SaaS（資料去向）、功能覆蓋、團隊維護能力。</p>
+  <div class="traps">
+    <h4>⚠️ 常見陷阱</h4>
+    <ul><li>Gateway 變 single point of failure：要 stateless、多 instance、health check</li><li>Gateway 自己 buffer streaming response，破壞 SSE 體驗</li><li>Log 晒原文 prompt / response，變成新嘅資料洩漏風險</li><li>PII redaction 用簡單 regex 就當搞掂；高合規場景需要更完善嘅 DLP 方案同人工 review</li><li>成本計算 hardcode 價錢冇更新</li><li>加入太多同步處理步驟，令每個 request 多咗明顯延遲</li></ul>
+  </div>
+</section>
+
+<section class="card" id="examples">
+  <h3>現實例子 + code</h3>
+  <div class="code-block"><div class="code-title">Python · minimal gateway (auth, budget, redaction, cost log)</div><pre><code class="language-python"># 極簡 LLM Gateway（FastAPI）：auth → quota → PII redaction → forward → log cost
+import re, time, logging, httpx
+from fastapi import FastAPI, Request, HTTPException
+
+app = FastAPI()
+log = logging.getLogger(&quot;gateway&quot;)
+upstream = httpx.AsyncClient(base_url=&quot;https://api.openai.com&quot;, timeout=60)
+
+VIRTUAL_KEYS = {&quot;vk_team_search&quot;: {&quot;team&quot;: &quot;search&quot;, &quot;monthly_budget_usd&quot;: 500}}  # 實際放 DB
+# 價錢只係 placeholder，以 provider 官方價錢為準
+PRICE_PER_1M = {&quot;gpt-4o-mini&quot;: {&quot;input&quot;: 0.0, &quot;output&quot;: 0.0}}
+
+EMAIL = re.compile(r&quot;[\w.+-]+@[\w-]+\.[\w.-]+&quot;)
+PHONE = re.compile(r&quot;\+?\d[\d\s-]{7,}\d&quot;)
+
+def redact(text: str) -&gt; str:
+    return PHONE.sub(&quot;[PHONE]&quot;, EMAIL.sub(&quot;[EMAIL]&quot;, text))
+
+def spent_this_month(team: str) -&gt; float:
+    return 0.0  # 實際由 DB / Redis 讀
+
+@app.post(&quot;/v1/chat/completions&quot;)
+async def chat(req: Request):
+    key = req.headers.get(&quot;authorization&quot;, &quot;&quot;).removeprefix(&quot;Bearer &quot;).strip()
+    tenant = VIRTUAL_KEYS.get(key)
+    if not tenant:
+        raise HTTPException(401, &quot;invalid key&quot;)
+    if spent_this_month(tenant[&quot;team&quot;]) &gt;= tenant[&quot;monthly_budget_usd&quot;]:
+        raise HTTPException(429, &quot;team budget exceeded&quot;)
+
+    body = await req.json()
+    for m in body.get(&quot;messages&quot;, []):
+        if isinstance(m.get(&quot;content&quot;), str):
+            m[&quot;content&quot;] = redact(m[&quot;content&quot;])
+
+    t0 = time.perf_counter()
+    resp = await upstream.post(
+        &quot;/v1/chat/completions&quot;, json=body,
+        headers={&quot;Authorization&quot;: f&quot;Bearer {get_provider_key()}&quot;},
+    )
+    latency_ms = (time.perf_counter() - t0) * 1000
+    data = resp.json()
+
+    usage = data.get(&quot;usage&quot;, {})
+    price = PRICE_PER_1M.get(body.get(&quot;model&quot;), {&quot;input&quot;: 0, &quot;output&quot;: 0})
+    cost = (usage.get(&quot;prompt_tokens&quot;, 0) * price[&quot;input&quot;]
+            + usage.get(&quot;completion_tokens&quot;, 0) * price[&quot;output&quot;]) / 1_000_000
+    # 結構化 log：唔好 log 原文 prompt（或者要 redact + 有 retention policy）
+    log.info(&quot;llm_request&quot;, extra={
+        &quot;team&quot;: tenant[&quot;team&quot;], &quot;model&quot;: body.get(&quot;model&quot;), &quot;status&quot;: resp.status_code,
+        &quot;latency_ms&quot;: round(latency_ms), &quot;prompt_tokens&quot;: usage.get(&quot;prompt_tokens&quot;),
+        &quot;completion_tokens&quot;: usage.get(&quot;completion_tokens&quot;), &quot;cost_usd&quot;: cost,
+    })
+    return data
+
+def get_provider_key() -&gt; str:
+    import os
+    return os.environ[&quot;OPENAI_API_KEY&quot;]   # 實際用 secret manager</code></pre></div><div class="code-block"><div class="code-title">YAML · gateway model alias config (illustrative)</div><pre><code class="language-yaml"># LiteLLM proxy 風格嘅 config（示意，欄位以官方文件為準）
+model_list:
+  - model_name: chat-default          # app 只認呢個別名
+    litellm_params:
+      model: openai/gpt-4o-mini
+      api_key: os.environ/OPENAI_API_KEY
+  - model_name: chat-default          # 同名 = 可做 load balancing / fallback
+    litellm_params:
+      model: anthropic/claude-3-5-haiku-latest
+      api_key: os.environ/ANTHROPIC_API_KEY</code></pre></div>
+</section>
+
+    <div class="lesson-pager"><a class="nav-dir prev" href="caching.html"><span>上一堂</span><strong>Caching</strong></a><span class="nav-dir next disabled"><span>下一堂</span><strong>—</strong></span></div>
+    
+        <button type="button" class="complete-btn" data-complete-btn>
+          標記為已完成
+        </button>
+  </main>
+
+  <footer>
+    <div class="container">
+      <p>LLM API Backend 面試實戰指南 · 專注 production 思維</p>
+    </div>
+  </footer>
+  <button id="to-top" aria-label="返回頂部">↑</button>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="../script.js"></script>
+</body>
+</html>

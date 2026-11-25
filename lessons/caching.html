@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-HK">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Caching · LLM API Backend 面試指南</title>
+  <meta name="description" content="Caching：面試官真正想問嘅嘢、生產環境現實、解決思路、現實例子 + code。">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+  <link rel="stylesheet" href="../style.css">
+</head>
+<body class="page-lesson" data-lesson="caching">
+  <div id="progress"></div>
+  
+  <header class="lesson-header">
+    <div class="container">
+      <a class="back-link" href="../index.html">← 返回課程首頁</a>
+      <p class="lesson-kicker">課程 · 06 / 07</p>
+      <h1>Caching</h1>
+      <p class="subtitle">最平、最快嘅 LLM call 就係唔使 call。但 cache 錯咗嘅答案比慢更差。</p>
+      
+        <button type="button" class="complete-btn" data-complete-btn>
+          標記為已完成
+        </button>
+    </div>
+  </header>
+
+    <nav id="toc" aria-label="本堂目錄">
+    
+    <div class="container">
+      <a href="#ask">面試官真正想問嘅嘢</a>
+      <a href="#production">生產環境現實</a>
+      <a href="#approach">解決思路</a>
+      <a href="#examples">現實例子 + code</a>
+    </div>
+  </nav>
+
+  <main class="container lesson-main">
+    <section class="card" id="ask">
+  <h3>面試官真正想問嘅嘢</h3>
+  <ul><li>LLM 成本高、延遲高，cache 係最直接嘅優化</li><li>考你知唔知 LLM cache 同一般 HTTP cache 嘅分別（非確定性、語意相似）</li><li>考 cache correctness：個人化內容、權限、stale data</li></ul>
+  <div class="sample-answer">
+    <h4>🗣️ 示範答法（30 秒版）</h4>
+    <blockquote>「我會分三層：exact cache 用 model、messages、參數同 prompt version 做 hash key，只 cache temperature 0 嘅 request；semantic cache 只用喺低風險、非個人化嘅問題，threshold 用 eval set 調；同埋利用 provider 嘅 prompt caching，將固定 system prompt 同文件放前面。Cache key 一定包含 tenant 防止洩漏，配合 TTL 同版本號做 invalidation。指標方面睇 hit rate、慳咗幾多 token 同成本，同埋抽樣檢查 cached 答案嘅正確性。」</blockquote>
+  </div>
+</section>
+
+<section class="card" id="production">
+  <h3>生產環境現實</h3>
+  <p><strong>情境：</strong>電商 FAQ bot 每日有大量重複問題，例如「幾時發貨」。加 exact cache 後成本明顯下降。之後團隊加 semantic cache，threshold 設太低，結果「點樣申請退款」同「點樣取消退款申請」返同一個答案，用戶投訴。</p>
+<p><strong>處理：</strong>semantic cache 只用喺非個人化、低風險嘅 FAQ 類問題；threshold 用 eval set 調；cache key 包含 tenant / language / prompt version；個人化或者有權限嘅內容唔 cache 或者按 user 分 namespace。</p>
+</section>
+
+<section class="card" id="approach">
+  <h3>解決思路</h3>
+  <ul><li><strong>Exact cache</strong>：用 (model, messages, temperature, tools, 其他參數) 做 hash 做 key；完全相同 request 直接返結果。適合 temperature=0、重複率高嘅 workload（例如 FAQ、batch 重跑）</li><li><strong>Semantic cache</strong>：將問題 embedding，如果同之前問題相似度高過 threshold 就返 cached 答案。命中率高啲，但有答錯風險（「點樣取消訂單」vs「點樣唔取消訂單」可能好相似）</li><li><strong>Prompt caching（provider 端）</strong>：部分 provider 支援對重複嘅 prompt prefix（例如長 system prompt、文件）做 cache，可以降低成本同延遲；有啲係自動，有啲要 explicit 標記，規則同價錢以官方文件為準。設計上要將<strong>固定內容放前面、變動內容放後面</strong></li><li><strong>TTL / invalidation</strong>：資料會變（RAG 文件更新、價格變動），cache 要有 TTL，或者 key 包含資料版本號</li><li><strong>Embedding cache</strong>：同一段文字唔使重複 embed，ingestion 時好有用</li></ul>
+  <div class="traps">
+    <h4>⚠️ 常見陷阱</h4>
+    <ul><li>Cache key 漏咗參數（model、temperature、tools、prompt version），返錯答案</li><li>跨 tenant / 跨 user 共用 cache，洩漏個人資料</li><li>Semantic cache threshold 冇用數據調，靠感覺</li><li>冇 TTL 或 invalidation，資料更新後仍然返舊答案</li><li>System prompt 開頭放動態內容，令 provider prompt caching 失效</li><li>淨係睇 hit rate，唔睇 cache 返錯答案嘅比率</li></ul>
+  </div>
+</section>
+
+<section class="card" id="examples">
+  <h3>現實例子 + code</h3>
+  <div class="code-block"><div class="code-title">Python · exact cache (Redis) + semantic cache sketch</div><pre><code class="language-python">import hashlib, json
+import numpy as np
+import redis
+
+r = redis.Redis()
+PROMPT_VERSION = &quot;v3&quot;     # 改 prompt 就改版本號 → 舊 cache 自然失效
+
+def cache_key(tenant: str, model: str, messages: list, **params) -&gt; str:
+    payload = json.dumps(
+        {&quot;v&quot;: PROMPT_VERSION, &quot;tenant&quot;: tenant, &quot;model&quot;: model,
+         &quot;messages&quot;: messages, &quot;params&quot;: params},
+        sort_keys=True, ensure_ascii=False,
+    )
+    return &quot;llm:exact:&quot; + hashlib.sha256(payload.encode()).hexdigest()
+
+def cached_completion(tenant, model, messages, llm_call, ttl=3600, **params):
+    if params.get(&quot;temperature&quot;, 1) &gt; 0:
+        return llm_call(model, messages, **params)   # 高 temperature 唔 cache
+    key = cache_key(tenant, model, messages, **params)
+    if (hit := r.get(key)) is not None:
+        return json.loads(hit)
+    result = llm_call(model, messages, **params)
+    r.set(key, json.dumps(result, ensure_ascii=False), ex=ttl)
+    return result
+
+# Semantic cache（示意）：實際應用 vector DB 做 ANN search
+class SemanticCache:
+    def __init__(self, embed_fn, threshold: float = 0.95):
+        self.embed_fn, self.threshold = embed_fn, threshold
+        self.vecs: list[np.ndarray] = []
+        self.answers: list[str] = []
+
+    def get(self, question: str) -&gt; str | None:
+        if not self.vecs:
+            return None
+        q = np.asarray(self.embed_fn(question))
+        mat = np.stack(self.vecs)
+        sims = mat @ q / (np.linalg.norm(mat, axis=1) * np.linalg.norm(q))
+        best = int(np.argmax(sims))
+        return self.answers[best] if sims[best] &gt;= self.threshold else None
+
+    def put(self, question: str, answer: str):
+        self.vecs.append(np.asarray(self.embed_fn(question)))
+        self.answers.append(answer)</code></pre></div><div class="code-block"><div class="code-title">Python · prompt-caching-friendly layout</div><pre><code class="language-python"># Prompt caching 友好嘅 message 排列：固定內容喺前，變動內容喺後
+messages = [
+    {&quot;role&quot;: &quot;system&quot;, &quot;content&quot;: LONG_SYSTEM_PROMPT},          # 固定，可被 prefix cache
+    {&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: f&quot;Reference docs:\n{STATIC_DOCS}&quot;},  # 較少變
+    {&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: user_question},                  # 每次唔同，放最後
+]
+# 唔好將 timestamp、request_id 之類放喺 system prompt 開頭，會令 prefix 每次都唔同</code></pre></div>
+</section>
+
+    <div class="lesson-pager"><a class="nav-dir prev" href="fallback.html"><span>上一堂</span><strong>Fallback & Routing</strong></a><a class="nav-dir next" href="gateway.html"><span>下一堂</span><strong>LLM Gateway</strong></a></div>
+    
+        <button type="button" class="complete-btn" data-complete-btn>
+          標記為已完成
+        </button>
+  </main>
+
+  <footer>
+    <div class="container">
+      <p>LLM API Backend 面試實戰指南 · 專注 production 思維</p>
+    </div>
+  </footer>
+  <button id="to-top" aria-label="返回頂部">↑</button>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="../script.js"></script>
+</body>
+</html>

@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-HK">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Q&amp;A Cheat Sheet · LLM API Backend 面試指南</title>
+  <meta name="description" content="面試 Q&amp;A Cheat Sheet：臨面試前快速溫習嘅答案骨架。">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+  <link rel="stylesheet" href="../style.css">
+</head>
+<body class="page-reference">
+  <div id="progress"></div>
+  
+  <header class="lesson-header">
+    <div class="container">
+      <a class="back-link" href="../index.html">← 返回課程首頁</a>
+      <p class="lesson-kicker">延伸閱讀 · B3</p>
+      <h1>面試 Q&A Cheat Sheet</h1>
+      <p class="subtitle">臨面試前快速溫習：一句起兩句止嘅答案骨架，再用上面嘅例子展開。</p>
+      
+    </div>
+  </header>
+
+  
+
+  <main class="container lesson-main">
+    <div class="qa-wrap" id="cheatsheet-body">
+<div class="qa-grid"><details class="qa"><summary>429 同 quota error 有咩分別？</summary><p>429 rate limit 係暫時性，可 backoff retry；quota / billing 類錯誤 retry 都冇用，要 alert 或 fallback。</p></details><details class="qa"><summary>點解要加 jitter？</summary><p>避免大量 client 同一時間重試造成 thundering herd，令負載更平均。</p></details><details class="qa"><summary>Token bucket vs fixed window？</summary><p>Token bucket 容許短暫 burst 同時控制平均速率；fixed window 喺窗口邊界可能出現雙倍流量。</p></details><details class="qa"><summary>SSE vs WebSocket？</summary><p>LLM 輸出係 server → client 單向，SSE 簡單、行 HTTP、易過 proxy；需要雙向即時互動先考慮 WebSocket。</p></details><details class="qa"><summary>Streaming 中途出錯點處理？</summary><p>HTTP status 已經送出，用 error event 通知；前端保留部分結果並提供重試。</p></details><details class="qa"><summary>JSON mode 夠唔夠？</summary><p>唔夠，佢只保證合法 JSON，唔保證 schema；仲要 Pydantic / Zod validate。</p></details><details class="qa"><summary>RAG 答錯先查邊度？</summary><p>先查 retrieval（有冇搵到正確 chunk），再查 prompt / generation。</p></details><details class="qa"><summary>點解要 rerank？</summary><p>Vector search 快但粗糙，rerank 用較準模型對少量 candidate 排序，提升 top-k 質素。</p></details><details class="qa"><summary>Circuit breaker 有咩用？</summary><p>Provider 持續失敗時快速 fail / 轉 fallback，避免每個 request 都等 timeout 拖垮系統。</p></details><details class="qa"><summary>Semantic cache 風險？</summary><p>相似但意思唔同嘅問題返錯答案；只用喺低風險場景，threshold 用數據調。</p></details><details class="qa"><summary>Prompt caching 點樣最大化？</summary><p>固定內容（system prompt、文件）放前面，變動內容放最後，唔好喺開頭放動態值。</p></details><details class="qa"><summary>LLM Gateway 最大好處？</summary><p>集中 auth、key 管理、限流、成本追蹤、觀測同 routing，app 唔使各自實現。</p></details><details class="qa"><summary>點樣控制 LLM 成本？</summary><p>Model routing（細任務用細 model）、caching、限制 max_tokens、按 feature 追蹤成本同 alert。</p></details><details class="qa"><summary>TTFT 係咩？點解重要？</summary><p>Time to first token，用戶感受到嘅等待時間，streaming 體驗嘅關鍵指標。</p></details><details class="qa"><summary>Prompt injection 點防？</summary><p>冇完美解法；最小權限、tool allowlist、人手確認、輸出當 untrusted、backend 做權限檢查。</p></details></div>
+</div>
+    <div class="lesson-pager"><a class="nav-dir prev" href="../index.html"><span>返回</span><strong>課程首頁</strong></a><span class="nav-dir next disabled"></span></div>
+    
+  </main>
+
+  <footer>
+    <div class="container">
+      <p>LLM API Backend 面試實戰指南 · 專注 production 思維</p>
+    </div>
+  </footer>
+  <button id="to-top" aria-label="返回頂部">↑</button>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="../script.js"></script>
+</body>
+</html>

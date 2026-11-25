@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-HK">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Structured Output · LLM API Backend 面試指南</title>
+  <meta name="description" content="Structured Output（JSON Schema / Function Calling）：面試官真正想問嘅嘢、生產環境現實、解決思路、現實例子 + code。">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+  <link rel="stylesheet" href="../style.css">
+</head>
+<body class="page-lesson" data-lesson="structured">
+  <div id="progress"></div>
+  
+  <header class="lesson-header">
+    <div class="container">
+      <a class="back-link" href="../index.html">← 返回課程首頁</a>
+      <p class="lesson-kicker">課程 · 03 / 07</p>
+      <h1>Structured Output（JSON Schema / Function Calling）</h1>
+      <p class="subtitle">LLM 本質係生成文字，但 backend 需要可以 parse 嘅資料。重點：schema 約束 + 驗證 + 失敗重試。</p>
+      
+        <button type="button" class="complete-btn" data-complete-btn>
+          標記為已完成
+        </button>
+    </div>
+  </header>
+
+    <nav id="toc" aria-label="本堂目錄">
+    
+    <div class="container">
+      <a href="#ask">面試官真正想問嘅嘢</a>
+      <a href="#production">生產環境現實</a>
+      <a href="#approach">解決思路</a>
+      <a href="#examples">現實例子 + code</a>
+    </div>
+  </nav>
+
+  <main class="container lesson-main">
+    <section class="card" id="ask">
+  <h3>面試官真正想問嘅嘢</h3>
+  <ul><li>幾乎所有 LLM 產品都要將輸出接入其他系統（DB、API、UI）</li><li>考你有冇「唔信任 LLM 輸出」嘅工程意識</li><li>考 validation、retry、graceful degradation 設計</li><li>Function calling 亦係 agent 系統嘅基礎</li></ul>
+  <div class="sample-answer">
+    <h4>🗣️ 示範答法（30 秒版）</h4>
+    <blockquote>「我唔會信任 LLM 輸出。第一層用 provider 嘅 JSON Schema / tool calling 約束格式；第二層 backend 用 Pydantic 或 Zod validate，包括 enum 同業務規則；仲要 check <code>finish_reason</code> 防止截斷。Validation 失敗就將錯誤訊息回饋俾模型做 1–2 次 repair retry，再失敗就入 dead-letter queue 或人手處理，唔會寫壞資料入 DB。我亦會 track 每個 schema 嘅 validation failure rate，作為 prompt 或 model 改動嘅 regression 指標。」</blockquote>
+  </div>
+</section>
+
+<section class="card" id="production">
+  <h3>生產環境現實</h3>
+  <p><strong>情境：</strong>客服系統用 LLM 由 email 抽取 <code>{intent, order_id, urgency}</code>，然後寫入 ticket system。上線後發現大約小部分 request 出事：有時 <code>urgency</code> 返 "very high"（唔喺 enum 入面），有時 email 好長導致 JSON 截斷。</p>
+<p><strong>處理：</strong>用 schema 約束 + Pydantic 驗證；失敗時將 validation error 回傳俾模型再試一次（最多 1–2 次）；仍然失敗就入 dead-letter queue / 人手處理，唔好寫垃圾資料入 DB。另外 check <code>finish_reason</code>，如果係長度截斷就調高 max_tokens 或者縮短 input。</p>
+</section>
+
+<section class="card" id="approach">
+  <h3>解決思路</h3>
+  <p>要 LLM 輸出穩定 JSON，有幾個層次：</p>
+<ol><li><strong>Prompt 要求 JSON</strong>：最弱，模型可能加 markdown code fence、多咗解釋文字</li><li><strong>JSON mode</strong>：保證係合法 JSON，但唔保證符合你嘅 schema</li><li><strong>JSON Schema / Structured Outputs</strong>：部分 provider 支援用 schema 約束輸出（具體支援範圍睇官方文件）</li><li><strong>Function / Tool calling</strong>：模型揀 tool 並生成 arguments（JSON），你嘅 code 去執行</li></ol>
+<p>無論用邊種，<strong>backend 都要自己 validate</strong>（Python 用 Pydantic，TS 用 Zod），因為：schema 支援有限制、模型可能拒答（refusal）、output 可能因 <code>max_tokens</code> 被截斷、業務規則（例如日期範圍、enum）schema 未必表達到。</p>
+  <div class="traps">
+    <h4>⚠️ 常見陷阱</h4>
+    <ul><li>用 JSON mode 就以為符合 schema —— JSON mode 只保證合法 JSON</li><li>冇 check <code>finish_reason</code>，截斷咗嘅 JSON 當正常處理</li><li>無限 retry，一個壞 input 燒大量 token</li><li>Tool calling 直接執行模型生成嘅 arguments，冇權限檢查（安全問題）</li><li>Schema 太複雜、嵌套太深 → 模型準確率下降，可以拆細做幾步</li><li>Temperature 太高令格式唔穩定</li></ul>
+  </div>
+</section>
+
+<section class="card" id="examples">
+  <h3>現實例子 + code</h3>
+  <div class="code-block"><div class="code-title">Python · Pydantic validation + repair retry</div><pre><code class="language-python">import json
+from enum import Enum
+from pydantic import BaseModel, Field, ValidationError
+from openai import OpenAI
+
+client = OpenAI()
+
+class Urgency(str, Enum):
+    low = &quot;low&quot;
+    medium = &quot;medium&quot;
+    high = &quot;high&quot;
+
+class TicketInfo(BaseModel):
+    intent: str = Field(description=&quot;refund / shipping / technical / other&quot;)
+    order_id: str | None = Field(default=None, pattern=r&quot;^ORD-\d{6}$&quot;)
+    urgency: Urgency
+
+SYSTEM = (&quot;Extract ticket info from the email. Reply with JSON only, matching this schema:\n&quot;
+          + json.dumps(TicketInfo.model_json_schema()))
+
+def extract(email: str, max_attempts: int = 3) -&gt; TicketInfo | None:
+    messages = [{&quot;role&quot;: &quot;system&quot;, &quot;content&quot;: SYSTEM},
+                {&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: email}]
+    for _ in range(max_attempts):
+        resp = client.chat.completions.create(
+            model=&quot;gpt-4o-mini&quot;,
+            messages=messages,
+            response_format={&quot;type&quot;: &quot;json_object&quot;},   # JSON mode：至少保證合法 JSON
+            temperature=0,
+        )
+        choice = resp.choices[0]
+        raw = choice.message.content or &quot;&quot;
+        if choice.finish_reason == &quot;length&quot;:
+            raise ValueError(&quot;Output truncated: raise max_tokens or shorten input&quot;)
+        try:
+            return TicketInfo.model_validate_json(raw)
+        except ValidationError as e:
+            # 將錯誤回饋俾模型，叫佢修正
+            messages += [
+                {&quot;role&quot;: &quot;assistant&quot;, &quot;content&quot;: raw},
+                {&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: f&quot;Invalid output. Fix these errors and return JSON only:\n{e}&quot;},
+            ]
+    return None   # 交俾 dead-letter queue / 人手處理</code></pre></div><div class="code-block"><div class="code-title">TypeScript · Zod validation</div><pre><code class="language-typescript">import { z } from &quot;zod&quot;;
+
+const TicketInfo = z.object({
+  intent: z.enum([&quot;refund&quot;, &quot;shipping&quot;, &quot;technical&quot;, &quot;other&quot;]),
+  order_id: z.string().regex(/^ORD-\d{6}$/).nullable(),
+  urgency: z.enum([&quot;low&quot;, &quot;medium&quot;, &quot;high&quot;]),
+});
+type TicketInfo = z.infer&lt;typeof TicketInfo&gt;;
+
+// 寬鬆 parse：去除模型有時加嘅 ```json fence
+function extractJson(text: string): unknown {
+  const cleaned = text.replace(/^```(?:json)?\s*/i, &quot;&quot;).replace(/```\s*$/, &quot;&quot;).trim();
+  return JSON.parse(cleaned);
+}
+
+export function parseTicket(raw: string):
+  { ok: true; data: TicketInfo } | { ok: false; error: string } {
+  try {
+    const result = TicketInfo.safeParse(extractJson(raw));
+    return result.success
+      ? { ok: true, data: result.data }
+      : { ok: false, error: result.error.issues.map(i =&gt; `${i.path.join(&quot;.&quot;)}: ${i.message}`).join(&quot;; &quot;) };
+  } catch (e) {
+    return { ok: false, error: `Invalid JSON: ${(e as Error).message}` };
+  }
+}
+
+// Tool calling 時同樣道理：模型生成嘅 arguments 都要 validate 先執行
+// const args = TicketInfo.parse(JSON.parse(toolCall.function.arguments));</code></pre></div>
+</section>
+
+    <div class="lesson-pager"><a class="nav-dir prev" href="streaming.html"><span>上一堂</span><strong>Streaming</strong></a><a class="nav-dir next" href="rag.html"><span>下一堂</span><strong>RAG</strong></a></div>
+    
+        <button type="button" class="complete-btn" data-complete-btn>
+          標記為已完成
+        </button>
+  </main>
+
+  <footer>
+    <div class="container">
+      <p>LLM API Backend 面試實戰指南 · 專注 production 思維</p>
+    </div>
+  </footer>
+  <button id="to-top" aria-label="返回頂部">↑</button>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="../script.js"></script>
+</body>
+</html>
